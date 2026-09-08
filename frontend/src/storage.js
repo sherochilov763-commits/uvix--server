@@ -3,7 +3,7 @@
 // ishlaydi, shuning uchun App.jsx kodi deyarli o'zgarishsiz qoldi.
 // Endi barcha /kv so'rovlari Authorization: Bearer <token> talab qiladi.
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:4000/api";
+const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const TOKEN_KEY = "uvix_auth_token";
 
 export function getToken() {
