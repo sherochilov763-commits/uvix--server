@@ -4,7 +4,7 @@ import {
   ResponsiveContainer, Legend, CartesianGrid,
 } from "recharts";
 import * as XLSX from "xlsx";
-import { apiGet, apiSet, authListEmployees, authLogin, authLoginByName, authLogout, authResetAdminPin, sendBackupNow } from "./storage.js";
+import { apiGet, apiSet, authListEmployees, authLogin, authLoginByName, authLogout, authResetAdminPin, sendBackupNow, requestPinReset, confirmPinReset } from "./storage.js";
 import {
   LayoutDashboard, TrendingUp, TrendingDown, ListChecks, FileBarChart2,
   FolderTree, Users, Settings, Plus, Search, Download, Printer, Trash2,
@@ -119,9 +119,19 @@ function paymentTypeBadgeColors(pt) {
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
+// Mahalliy (brauzer/foydalanuvchi) sanasini "YYYY-MM-DD" ko'rinishida qaytaradi.
+// MUHIM: toISOString() har doim UTC vaqtini beradi — Toshkent (UTC+5) uchun bu
+// kechasi 00:00–04:59 oralig'ida "kechagi kun"ni ko'rsatib, sana bir kun orqada
+// qolib ketishiga sabab bo'lardi. Shu sababli getFullYear/getMonth/getDate
+// (mahalliy vaqt komponentlari) orqali hisoblanadi.
+function localDateStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 function todayStr() {
-  const d = new Date();
-  return d.toISOString().slice(0, 10);
+  return localDateStr(new Date());
 }
 function fmt(n) {
   if (n === null || n === undefined || isNaN(n)) return "0";
@@ -651,7 +661,8 @@ export default function App() {
           const next = [emp];
           await persistEmployees(next);
         }}
-        onResetAdminPin={authResetAdminPin}
+        onRequestPinReset={requestPinReset}
+        onConfirmPinReset={confirmPinReset}
       />
     );
   }
@@ -666,6 +677,7 @@ export default function App() {
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif", color: THEME.text, minHeight: "100vh" }}>
       <style>{`
+        html, body { overflow-x: hidden; max-width: 100vw; overscroll-behavior-x: none; }
         * { box-sizing: border-box; }
         .uvix-scroll::-webkit-scrollbar { height: 6px; width: 6px; }
         .uvix-scroll::-webkit-scrollbar-thumb { background: #D8D4E8; border-radius: 4px; }
@@ -754,7 +766,7 @@ export default function App() {
           [style*="grid-template-columns: 1.2fr 0.8fr 0.8fr auto"] { grid-template-columns: 1fr !important; }
         }
       `}</style>
-      <div className={`uvix-density-${appearance.density || "comfortable"}`} style={{ display: "flex", minHeight: "100vh", background: THEME.surface }}>
+      <div className={`uvix-density-${appearance.density || "comfortable"}`} style={{ display: "flex", minHeight: "100vh", background: THEME.surface, maxWidth: "100vw", overflowX: "hidden" }}>
         <Sidebar nav={visibleNav} view={view} setView={(v) => { setNavFilter(null); setView(v); }} user={currentUser} onLogout={() => { authLogout(); setCurrentUser(null); }} sidebarStyle={appearance.sidebarStyle} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <Topbar user={currentUser} view={view} onLogout={() => { authLogout(); setCurrentUser(null); }} onMenuClick={() => setSidebarOpen(true)} />
@@ -865,23 +877,51 @@ export default function App() {
 }
 
 /* ---------------- LOGIN ---------------- */
-function LoginScreen({ employees, onLogin, onCreateFirstAdmin, onResetAdminPin }) {
+function LoginScreen({ employees, onLogin, onCreateFirstAdmin, onRequestPinReset, onConfirmPinReset }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [confirmReset, setConfirmReset] = useState(false);
-  const [resetMsg, setResetMsg] = useState("");
+  // Forgot-PIN oqimi: "closed" -> "email" -> "code"
+  const [forgotStep, setForgotStep] = useState("closed");
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotCode, setForgotCode] = useState("");
+  const [forgotNewPin, setForgotNewPin] = useState("");
+  const [forgotMsg, setForgotMsg] = useState("");
+  const [forgotError, setForgotError] = useState("");
+  const [forgotLoading, setForgotLoading] = useState(false);
 
-  async function doResetPin() {
-    setConfirmReset(false);
+  async function sendForgotCode() {
+    if (!forgotEmail.trim()) { setForgotError("Email manzilini kiriting"); return; }
+    setForgotLoading(true);
+    setForgotError("");
     try {
-      await onResetAdminPin();
-      setResetMsg("Administrator PIN'i \"0000\"ga qaytarildi. Endi shu bilan kiring.");
+      await onRequestPinReset(forgotEmail.trim());
+      setForgotStep("code");
+      setForgotMsg("Tasdiqlash kodi email'ingizga yuborildi (10 daqiqa amal qiladi)");
     } catch (e) {
-      setResetMsg(e?.message || "Tiklab bo'lmadi");
+      setForgotError(e?.message || "Yuborib bo'lmadi");
+    } finally {
+      setForgotLoading(false);
+    }
+  }
+  async function confirmForgotCode() {
+    if (!/^\d{4,6}$/.test(forgotCode)) { setForgotError("Kodni to'g'ri kiriting"); return; }
+    if (!/^\d{4,6}$/.test(forgotNewPin)) { setForgotError("Yangi PIN 4-6 xonali raqam bo'lishi kerak"); return; }
+    setForgotLoading(true);
+    setForgotError("");
+    try {
+      await onConfirmPinReset(forgotEmail.trim(), forgotCode.trim(), forgotNewPin);
+      setForgotMsg("PIN muvaffaqiyatli yangilandi. Endi shu bilan kiring.");
+      setForgotStep("closed");
+      setForgotCode("");
+      setForgotNewPin("");
+    } catch (e) {
+      setForgotError(e?.message || "Tiklab bo'lmadi");
+    } finally {
+      setForgotLoading(false);
     }
   }
 
@@ -1011,30 +1051,76 @@ function LoginScreen({ employees, onLogin, onCreateFirstAdmin, onResetAdminPin }
         <div style={{ textAlign: "center", color: "#6E6690", fontSize: 11, marginTop: 16 }}>
           Standart admin: <b style={{ color: "#A79FC9" }}>Administrator</b> · PIN <b style={{ color: "#A79FC9" }}>0000</b>
         </div>
-        {onResetAdminPin && (
-          <div style={{ textAlign: "center", marginTop: 10 }}>
-            {resetMsg ? (
-              <div style={{ fontSize: 11.5, color: "#A79FC9" }}>{resetMsg}</div>
-            ) : (
-              <button onClick={() => setConfirmReset(true)} style={{ background: "none", border: "none", color: "#8B84AD", cursor: "pointer", fontSize: 11.5, padding: 0, textDecoration: "underline" }}>
-                PIN'ni unutdingizmi?
-              </button>
+        {onRequestPinReset && (
+          <div style={{ marginTop: 10 }}>
+            {forgotStep === "closed" && (
+              <div style={{ textAlign: "center" }}>
+                {forgotMsg && !forgotError ? (
+                  <div style={{ fontSize: 11.5, color: "#A79FC9" }}>{forgotMsg}</div>
+                ) : (
+                  <button onClick={() => { setForgotStep("email"); setForgotMsg(""); setForgotError(""); }} style={{ background: "none", border: "none", color: "#8B84AD", cursor: "pointer", fontSize: 11.5, padding: 0, textDecoration: "underline" }}>
+                    PIN'ni unutdingizmi?
+                  </button>
+                )}
+              </div>
+            )}
+            {forgotStep === "email" && (
+              <div style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 14, padding: 14, marginTop: 8 }}>
+                <div style={{ color: "#C9C2E4", fontSize: 12, fontWeight: 600, marginBottom: 8 }}>Ro'yxatdagi email manzilingizni kiriting</div>
+                <input
+                  autoFocus
+                  type="email"
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && sendForgotCode()}
+                  placeholder="sizniki@gmail.com"
+                  style={{ width: "100%", padding: "9px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.07)", color: "#fff", fontSize: 14, outline: "none" }}
+                />
+                {forgotError && <div style={{ color: "#FCA5A5", fontSize: 11.5, marginTop: 8 }}>{forgotError}</div>}
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <button onClick={() => setForgotStep("closed")} style={{ flex: 1, padding: "9px 0", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "none", color: "#C9C2E4", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>Bekor qilish</button>
+                  <button onClick={sendForgotCode} disabled={forgotLoading} style={{ flex: 1, padding: "9px 0", borderRadius: 10, border: "none", background: THEME.violet, color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: forgotLoading ? "not-allowed" : "pointer", opacity: forgotLoading ? 0.7 : 1 }}>
+                    {forgotLoading ? "Yuborilmoqda..." : "Kod yuborish"}
+                  </button>
+                </div>
+              </div>
+            )}
+            {forgotStep === "code" && (
+              <div style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 14, padding: 14, marginTop: 8 }}>
+                <div style={{ color: "#C9C2E4", fontSize: 12, fontWeight: 600, marginBottom: 8 }}>{forgotMsg}</div>
+                <input
+                  autoFocus
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={forgotCode}
+                  onChange={(e) => setForgotCode(e.target.value.replace(/\D/g, ""))}
+                  placeholder="Tasdiqlash kodi"
+                  style={{ width: "100%", padding: "9px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.07)", color: "#fff", fontSize: 14, outline: "none", marginBottom: 8, letterSpacing: 2 }}
+                />
+                <input
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={forgotNewPin}
+                  onChange={(e) => setForgotNewPin(e.target.value.replace(/\D/g, ""))}
+                  onKeyDown={(e) => e.key === "Enter" && confirmForgotCode()}
+                  placeholder="Yangi PIN (4-6 raqam)"
+                  style={{ width: "100%", padding: "9px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.07)", color: "#fff", fontSize: 14, outline: "none", letterSpacing: 2 }}
+                />
+                {forgotError && <div style={{ color: "#FCA5A5", fontSize: 11.5, marginTop: 8 }}>{forgotError}</div>}
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <button onClick={() => setForgotStep("closed")} style={{ flex: 1, padding: "9px 0", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "none", color: "#C9C2E4", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>Bekor qilish</button>
+                  <button onClick={confirmForgotCode} disabled={forgotLoading} style={{ flex: 1, padding: "9px 0", borderRadius: 10, border: "none", background: THEME.violet, color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: forgotLoading ? "not-allowed" : "pointer", opacity: forgotLoading ? 0.7 : 1 }}>
+                    {forgotLoading ? "Tekshirilmoqda..." : "Tiklash"}
+                  </button>
+                </div>
+              </div>
             )}
           </div>
-        )}
-        {confirmReset && (
-          <ConfirmDialog
-            message={'Administrator hisobining PIN kodi "0000"ga qaytariladi. Boshqa ma\'lumotlarga (buyurtma, rasxod va h.k.) hech qanday ta\'sir qilmaydi. Davom etasizmi?'}
-            onCancel={() => setConfirmReset(false)}
-            onConfirm={doResetPin}
-          />
         )}
       </div>
     </div>
   );
 }
-
-/* ---------------- SIDEBAR / TOPBAR ---------------- */
 
 /* ---------------- SIDEBAR / TOPBAR ---------------- */
 function Sidebar({ nav, view, setView, user, onLogout, sidebarStyle, isOpen, onClose }) {
@@ -1120,8 +1206,17 @@ function Topbar({ user, view, onLogout, onMenuClick }) {
   return (
     <div className="no-print" style={{ padding: "18px 24px 0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <button onClick={onMenuClick} className="uvix-hamburger uvix-iconbtn" style={{ background: THEME.card, border: `1px solid ${THEME.border}`, borderRadius: 9, padding: 8, cursor: "pointer", display: "none", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-          <ListChecks size={17} color={THEME.text} />
+        <button
+          onClick={onMenuClick}
+          className="uvix-hamburger uvix-iconbtn"
+          style={{
+            background: THEME.card, border: `1px solid ${THEME.border}`, borderRadius: 11, cursor: "pointer",
+            display: "none", alignItems: "center", justifyContent: "center", flexShrink: 0,
+            width: 44, height: 44, minWidth: 44, minHeight: 44, position: "relative", zIndex: 50,
+            WebkitTapHighlightColor: "transparent", touchAction: "manipulation",
+          }}
+        >
+          <ListChecks size={20} color={THEME.text} />
         </button>
         <div>
           <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: -0.3 }}>{title}</div>
@@ -1543,7 +1638,7 @@ function Dashboard({ orders, expenses, isAdmin, onNavigate, settings, onSaveSett
       const spanDays = Math.round((end - start) / 86400000) + 1;
       if (spanDays > 0 && spanDays <= 45) {
         for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-          const key = d.toISOString().slice(0, 10);
+          const key = localDateStr(d);
           const paid = stats.allPayments.filter((p) => p.date === key).reduce((s, p) => s + p.amount, 0);
           const exp = dateFilteredExpenses.filter((t) => t.date === key).reduce((s, t) => s + t.amount, 0);
           days.push({ label: dateLabel(key), "To'lov": paid, Rasxod: exp });
@@ -1556,7 +1651,7 @@ function Dashboard({ orders, expenses, isAdmin, onNavigate, settings, onSaveSett
     for (let i = 13; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
-      const key = d.toISOString().slice(0, 10);
+      const key = localDateStr(d);
       const paid = stats.allPayments.filter((p) => p.date === key).reduce((s, p) => s + p.amount, 0);
       const exp = dateFilteredExpenses.filter((t) => t.date === key).reduce((s, t) => s + t.amount, 0);
       days.push({ label: dateLabel(key), "To'lov": paid, Rasxod: exp });
@@ -2127,7 +2222,10 @@ function OrdersView({ orders, allOrders, transactions, currentUser, isAdmin, cat
   }
 
   function parseExcelDate(val) {
-    if (val instanceof Date) return val.toISOString().slice(0, 10);
+    // Excel'dan kelgan Date obyektlari odatda UTC-asosli bo'ladi (XLSX kutubxonasi shunday hosil qiladi),
+    // shuning uchun bu yerda getUTC* metodlari ishlatiladi — mahalliy vaqt bilan aralashtirilsa,
+    // sana bir kun siljib ketishi mumkin edi.
+    if (val instanceof Date) return `${val.getUTCFullYear()}-${String(val.getUTCMonth() + 1).padStart(2, "0")}-${String(val.getUTCDate()).padStart(2, "0")}`;
     if (typeof val === "number") {
       const d = XLSX.SSF.parse_date_code(val);
       if (d) return `${d.y}-${String(d.m).padStart(2, "0")}-${String(d.d).padStart(2, "0")}`;
@@ -2768,10 +2866,10 @@ function OrderForm({ initial, currentUser, categories, employees, settings, allO
                 <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr 0.8fr auto", gap: 8, alignItems: "start" }}>
                   <div>
                     <div style={{ display: "flex", gap: 6 }}>
-                      <select value={line.materialType} onChange={(e) => updateMaterialLine(line.id, "materialType", e.target.value)} style={{ ...getInputStyle(), background: "#fff" }}>
+                      <select value={line.materialType} onChange={(e) => updateMaterialLine(line.id, "materialType", e.target.value)} style={{ ...getInputStyle(), background: THEME.card }}>
                         {materialOptions.map((m) => <option key={m} value={m}>{m}</option>)}
                       </select>
-                      <button type="button" onClick={() => setNewMatLineOpen(newMatLineOpen === line.id ? null : line.id)} title="Yangi material turi" style={{ ...getIconBtn(), flexShrink: 0, padding: "0 10px", background: "#fff" }}>
+                      <button type="button" onClick={() => setNewMatLineOpen(newMatLineOpen === line.id ? null : line.id)} title="Yangi material turi" style={{ ...getIconBtn(), flexShrink: 0, padding: "0 10px", background: THEME.card }}>
                         <Plus size={14} />
                       </button>
                     </div>
@@ -2783,7 +2881,7 @@ function OrderForm({ initial, currentUser, categories, employees, settings, allO
                           onChange={(e) => setNewMatLineName(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), submitNewMaterialLine(line.id))}
                           placeholder="Yangi material turi nomi"
-                          style={{ ...getInputStyle(), fontSize: 12.5, background: "#fff" }}
+                          style={{ ...getInputStyle(), fontSize: 12.5, background: THEME.card }}
                         />
                         <Button type="button" onClick={() => submitNewMaterialLine(line.id)} style={{ padding: "8px 12px", fontSize: 12 }}>Qo'shish</Button>
                       </div>
@@ -2794,21 +2892,21 @@ function OrderForm({ initial, currentUser, categories, employees, settings, allO
                     onChange={(e) => updateMaterialLine(line.id, "areaStr", sanitizeDecimal(e.target.value))}
                     placeholder="Kv/m"
                     inputMode="decimal"
-                    style={{ ...getInputStyle(), background: "#fff" }}
+                    style={{ ...getInputStyle(), background: THEME.card }}
                   />
                   <input
                     value={line.priceStr}
                     onChange={(e) => updateMaterialLine(line.id, "priceStr", sanitizeDecimal(e.target.value))}
                     placeholder="$ / m²"
                     inputMode="decimal"
-                    style={{ ...getInputStyle(), background: "#fff" }}
+                    style={{ ...getInputStyle(), background: THEME.card }}
                   />
                   <button
                     type="button"
                     onClick={() => removeMaterialLine(line.id)}
                     disabled={materialLines.length <= 1}
                     className="uvix-iconbtn"
-                    style={{ ...getIconBtn(), background: "#fff", opacity: materialLines.length <= 1 ? 0.35 : 1, marginTop: 0 }}
+                    style={{ ...getIconBtn(), background: THEME.card, opacity: materialLines.length <= 1 ? 0.35 : 1, marginTop: 0 }}
                   >
                     <X size={14} color={THEME.rose} />
                   </button>
@@ -2902,10 +3000,10 @@ function OrderForm({ initial, currentUser, categories, employees, settings, allO
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   <Field label="Material turi">
                     <div style={{ display: "flex", gap: 6 }}>
-                      <select value={matExpType} onChange={(e) => setMatExpType(e.target.value)} style={{ ...getInputStyle(), background: "#fff" }}>
+                      <select value={matExpType} onChange={(e) => setMatExpType(e.target.value)} style={{ ...getInputStyle(), background: THEME.card }}>
                         {materialOptions.map((m) => <option key={m} value={m}>{m}</option>)}
                       </select>
-                      <button type="button" onClick={() => setNewMatExpOpen((v) => !v)} title="Yangi material turi" style={{ ...getIconBtn(), flexShrink: 0, padding: "0 10px", background: "#fff" }}>
+                      <button type="button" onClick={() => setNewMatExpOpen((v) => !v)} title="Yangi material turi" style={{ ...getIconBtn(), flexShrink: 0, padding: "0 10px", background: THEME.card }}>
                         <Plus size={14} />
                       </button>
                     </div>
@@ -2917,14 +3015,14 @@ function OrderForm({ initial, currentUser, categories, employees, settings, allO
                           onChange={(e) => setNewMatExpName(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), submitNewMatExp())}
                           placeholder="Yangi material turi nomi"
-                          style={{ ...getInputStyle(), fontSize: 12.5, background: "#fff" }}
+                          style={{ ...getInputStyle(), fontSize: 12.5, background: THEME.card }}
                         />
                         <Button type="button" onClick={submitNewMatExp} style={{ padding: "8px 12px", fontSize: 12 }}>Qo'shish</Button>
                       </div>
                     )}
                   </Field>
                   <Field label="Xarajat summasi (so'm)">
-                    <input value={matExpAmountStr} onChange={handleMatExpAmountChange} placeholder="0" inputMode="numeric" style={{ ...getInputStyle(), background: "#fff" }} />
+                    <input value={matExpAmountStr} onChange={handleMatExpAmountChange} placeholder="0" inputMode="numeric" style={{ ...getInputStyle(), background: THEME.card }} />
                   </Field>
                 </div>
                 <Field label="To'lov turi (material uchun)">
@@ -2949,7 +3047,7 @@ function OrderForm({ initial, currentUser, categories, employees, settings, allO
                         <select value={matExpType} onChange={(e) => setMatExpType(e.target.value)} style={getInputStyle()}>
                           {materialOptions.map((m) => <option key={m} value={m}>{m}</option>)}
                         </select>
-                        <button type="button" onClick={() => setNewMatExpOpen((v) => !v)} title="Yangi material turi" style={{ ...getIconBtn(), flexShrink: 0, padding: "0 10px", background: "#fff" }}>
+                        <button type="button" onClick={() => setNewMatExpOpen((v) => !v)} title="Yangi material turi" style={{ ...getIconBtn(), flexShrink: 0, padding: "0 10px", background: THEME.card }}>
                           <Plus size={14} />
                         </button>
                       </div>
@@ -2961,14 +3059,14 @@ function OrderForm({ initial, currentUser, categories, employees, settings, allO
                             onChange={(e) => setNewMatExpName(e.target.value)}
                             onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), submitNewMatExp())}
                             placeholder="Yangi material turi nomi"
-                            style={{ ...getInputStyle(), fontSize: 12.5, background: "#fff" }}
+                            style={{ ...getInputStyle(), fontSize: 12.5, background: THEME.card }}
                           />
                           <Button type="button" onClick={submitNewMatExp} style={{ padding: "8px 12px", fontSize: 12 }}>Qo'shish</Button>
                         </div>
                       )}
                     </Field>
                     <Field label="Xarajat summasi (so'm)">
-                      <input value={matExpAmountStr} onChange={handleMatExpAmountChange} placeholder="0" inputMode="numeric" style={{ ...getInputStyle(), background: "#fff" }} />
+                      <input value={matExpAmountStr} onChange={handleMatExpAmountChange} placeholder="0" inputMode="numeric" style={{ ...getInputStyle(), background: THEME.card }} />
                     </Field>
                   </div>
                   <Field label="To'lov turi (material uchun)">
@@ -3242,7 +3340,7 @@ function TransactionForm({ initial, currentUser, categories, orders, onAddCatego
                 style={{ ...getInputStyle(), paddingLeft: 30, borderColor: linkedOrderId ? THEME.violet : undefined }}
               />
               {showOrderSuggestions && orderSuggestions.length > 0 && (
-                <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "#fff", border: `1px solid ${THEME.border}`, borderRadius: 11, boxShadow: THEME.shadowLg, zIndex: 20, maxHeight: 200, overflowY: "auto", padding: 4 }} className="uvix-scroll">
+                <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: THEME.card, border: `1px solid ${THEME.border}`, borderRadius: 11, boxShadow: THEME.shadowLg, zIndex: 20, maxHeight: 200, overflowY: "auto", padding: 4 }} className="uvix-scroll">
                   {orderSuggestions.map((o) => (
                     <button
                       key={o.id}
@@ -3258,7 +3356,7 @@ function TransactionForm({ initial, currentUser, categories, orders, onAddCatego
                 </div>
               )}
               {showOrderSuggestions && orderQuery.trim() && orderSuggestions.length === 0 && (
-                <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "#fff", border: `1px solid ${THEME.border}`, borderRadius: 11, padding: "10px 14px", fontSize: 12, color: THEME.muted, zIndex: 20 }}>
+                <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: THEME.card, border: `1px solid ${THEME.border}`, borderRadius: 11, padding: "10px 14px", fontSize: 12, color: THEME.muted, zIndex: 20 }}>
                   Buyurtma topilmadi
                 </div>
               )}
@@ -3456,7 +3554,7 @@ const PERIODS = [
 ];
 function periodRange(period, customFrom, customTo) {
   const now = new Date();
-  const fmtD = (d) => d.toISOString().slice(0, 10);
+  const fmtD = (d) => localDateStr(d);
   if (period === "today") return { from: fmtD(now), to: fmtD(now) };
   if (period === "yesterday") {
     const y = new Date(now); y.setDate(y.getDate() - 1);
@@ -3779,17 +3877,30 @@ function EmployeesView({ employees, onSave, auditLog, currentUser }) {
   const [name, setName] = useState("");
   const [role, setRole] = useState("operator");
   const [pin, setPin] = useState("");
+  const [email, setEmail] = useState("");
   const [error, setError] = useState("");
   const [confirmDel, setConfirmDel] = useState(null);
   const [tab, setTab] = useState("list");
+  const [editEmailFor, setEditEmailFor] = useState(null);
+  const [editEmailValue, setEditEmailValue] = useState("");
+  const [editEmailError, setEditEmailError] = useState("");
+
+  function saveEmail() {
+    const trimmed = editEmailValue.trim();
+    if (trimmed && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return setEditEmailError("Email manzili noto'g'ri formatda");
+    onSave(employees.map((e) => (e.id === editEmailFor.id ? { ...e, email: trimmed } : e)));
+    setEditEmailFor(null);
+    setEditEmailError("");
+  }
 
   function addEmployee() {
     if (!name.trim()) return setError("Ismni kiriting");
     if (!/^\d{4,6}$/.test(pin)) return setError("PIN 4-6 xonali raqam bo'lishi kerak");
     if (employees.some((e) => e.name.toLowerCase() === name.trim().toLowerCase())) return setError("Bu ism band");
-    const next = [...employees, { id: uid(), name: name.trim(), role, pin }];
+    if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) return setError("Email manzili noto'g'ri formatda");
+    const next = [...employees, { id: uid(), name: name.trim(), role, pin, email: email.trim() }];
     onSave(next);
-    setModal(false); setName(""); setPin(""); setRole("operator"); setError("");
+    setModal(false); setName(""); setPin(""); setRole("operator"); setEmail(""); setError("");
   }
   function removeEmployee(emp) {
     onSave(employees.filter((e) => e.id !== emp.id));
@@ -3811,6 +3922,7 @@ function EmployeesView({ employees, onSave, auditLog, currentUser }) {
             <thead>
               <tr style={{ textAlign: "left", background: "transparent", borderBottom: `1.5px solid ${THEME.border}` }}>
                 <th style={{ padding: "13px 16px", fontSize: 10.5, color: THEME.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Ism</th>
+                <th style={{ padding: "13px 16px", fontSize: 10.5, color: THEME.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Email</th>
                 <th style={{ padding: "13px 16px", fontSize: 10.5, color: THEME.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Rol</th>
                 <th style={{ padding: "13px 16px", fontSize: 10.5, color: THEME.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Ruxsatlar</th>
                 <th style={{ padding: "13px 16px", fontSize: 10.5, color: THEME.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}></th>
@@ -3820,6 +3932,19 @@ function EmployeesView({ employees, onSave, auditLog, currentUser }) {
               {employees.map((e) => (
                 <tr key={e.id} className="uvix-row" style={{ borderBottom: `1px solid ${THEME.border}` }}>
                   <td style={{ padding: "13px 16px", fontWeight: 600 }}>{e.name}</td>
+                  <td style={{ padding: "13px 16px", color: THEME.muted, fontSize: 12.5 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      {e.email || <span style={{ color: THEME.rose }}>Kiritilmagan</span>}
+                      <button
+                        onClick={() => { setEditEmailFor(e); setEditEmailValue(e.email || ""); setEditEmailError(""); }}
+                        className="uvix-iconbtn"
+                        style={{ ...getIconBtn(), padding: 3 }}
+                        title="Email'ni tahrirlash"
+                      >
+                        <Pencil size={12} />
+                      </button>
+                    </div>
+                  </td>
                   <td style={{ padding: "13px 16px" }}>
                     <Badge color={e.role === "admin" ? THEME.violetDark : "#0F6E56"} bg={e.role === "admin" ? "#EFE9FE" : THEME.greenBg}>
                       {e.role === "admin" ? "Admin" : "Operator"}
@@ -3878,6 +4003,9 @@ function EmployeesView({ employees, onSave, auditLog, currentUser }) {
             <Field label="PIN kod (4-6 raqam)">
               <input value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))} style={getInputStyle()} placeholder="0000" inputMode="numeric" maxLength={6} />
             </Field>
+            <Field label="Email (PIN unutilganda tiklash uchun)">
+              <input value={email} onChange={(e) => setEmail(e.target.value)} style={getInputStyle()} placeholder="xodim@gmail.com" type="email" />
+            </Field>
             {error && <div style={{ color: THEME.rose, fontSize: 12.5 }}>{error}</div>}
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <Button variant="ghost" onClick={() => setModal(false)}>Bekor qilish</Button>
@@ -3892,6 +4020,20 @@ function EmployeesView({ employees, onSave, auditLog, currentUser }) {
           onCancel={() => setConfirmDel(null)}
           onConfirm={() => removeEmployee(confirmDel)}
         />
+      )}
+      {editEmailFor && (
+        <Modal title={`${editEmailFor.name} — email`} onClose={() => setEditEmailFor(null)} width={380}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <Field label="Email (PIN unutilganda tiklash uchun)">
+              <input value={editEmailValue} onChange={(e) => setEditEmailValue(e.target.value)} style={getInputStyle()} placeholder="xodim@gmail.com" type="email" autoFocus />
+            </Field>
+            {editEmailError && <div style={{ color: THEME.rose, fontSize: 12.5 }}>{editEmailError}</div>}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <Button variant="ghost" onClick={() => setEditEmailFor(null)}>Bekor qilish</Button>
+              <Button onClick={saveEmail}>Saqlash</Button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -4242,7 +4384,7 @@ function DashboardConstructorSection({ settings, onSaveSettings }) {
                       <select
                         value={w.size || "md"}
                         onChange={(e) => changeSize(w.id, e.target.value)}
-                        style={{ flexShrink: 0, fontSize: 11, fontWeight: 600, padding: "4px 6px", borderRadius: 7, border: `1px solid ${THEME.border}`, background: "#fff", color: THEME.text, cursor: "pointer" }}
+                        style={{ flexShrink: 0, fontSize: 11, fontWeight: 600, padding: "4px 6px", borderRadius: 7, border: `1px solid ${THEME.border}`, background: THEME.card, color: THEME.text, cursor: "pointer" }}
                       >
                         {Object.keys(DASHBOARD_SIZE_SPANS).map((s) => (
                           <option key={s} value={s}>{DASHBOARD_SIZE_LABELS[s]}</option>
@@ -4292,6 +4434,14 @@ function SettingsView({ currentUser, employees, onSave, onLogout, isAdmin, setti
   const [tgUnlockPin, setTgUnlockPin] = useState("");
   const [tgUnlockError, setTgUnlockError] = useState("");
   const [tgUnlocking, setTgUnlocking] = useState(false);
+  const [gmailUser, setGmailUser] = useState(settings?.gmailUser || "");
+  const [gmailAppPassword, setGmailAppPassword] = useState(settings?.gmailAppPassword || "");
+  const [gmailMsg, setGmailMsg] = useState("");
+
+  function saveGmail() {
+    onSaveSettings({ ...settings, gmailUser: gmailUser.trim(), gmailAppPassword: gmailAppPassword.trim() });
+    setGmailMsg("Saqlandi");
+  }
 
   async function unlockTelegram() {
     setTgUnlocking(true);
@@ -4486,6 +4636,33 @@ function SettingsView({ currentUser, employees, onSave, onLogout, isAdmin, setti
                 </Button>
               </div>
               {backupMsg && <div style={{ fontSize: 12, color: backupMsg.includes("xato") ? THEME.rose : THEME.green, marginTop: 8 }}>{backupMsg}</div>}
+            </div>
+            <div style={{ borderTop: `1px dashed ${THEME.border}`, marginTop: 14, paddingTop: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>Email orqali PIN tiklash (Gmail)</div>
+              <div style={{ fontSize: 12, color: THEME.muted, marginBottom: 10 }}>
+                Xodim PIN'ini unutsa, "PIN'ni unutdingizmi?" havolasi orqali email'iga tasdiqlash kodi yuboriladi.
+                Buning uchun Gmail hisobingizdan <b style={{ color: THEME.text }}>App Password</b> (ilova paroli) kerak —
+                oddiy Gmail parolingiz emas. Google hisobingizda 2 bosqichli tasdiqlashni yoqib,
+                myaccount.google.com/apppasswords sahifasidan yarating.
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <Field label="Gmail manzili">
+                  <input value={gmailUser} onChange={(e) => setGmailUser(e.target.value)} style={getInputStyle()} placeholder="sizniki@gmail.com" type="email" />
+                </Field>
+                <Field label="App Password (16 belgili)">
+                  <input value={gmailAppPassword} onChange={(e) => setGmailAppPassword(e.target.value)} style={getInputStyle()} placeholder="xxxx xxxx xxxx xxxx" type="password" />
+                </Field>
+                <div><Button onClick={saveGmail}>Saqlash</Button></div>
+                {gmailMsg && <div style={{ fontSize: 12, color: THEME.green }}>{gmailMsg}</div>}
+                <div style={{ fontSize: 11.5, color: THEME.muted, display: "flex", alignItems: "center", gap: 6 }}>
+                  Holat:
+                  {settings?.gmailUser && settings?.gmailAppPassword ? (
+                    <Badge color={THEME.green} bg={THEME.greenBg}>Yoqilgan</Badge>
+                  ) : (
+                    <Badge color={THEME.muted} bg={THEME.surface}>O'chirilgan</Badge>
+                  )}
+                </div>
+              </div>
             </div>
               </>
             )}

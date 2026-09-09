@@ -3,7 +3,7 @@
 // ishlaydi, shuning uchun App.jsx kodi deyarli o'zgarishsiz qoldi.
 // Endi barcha /kv so'rovlari Authorization: Bearer <token> talab qiladi.
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:4000/api";
+const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const TOKEN_KEY = "uvix_auth_token";
 
 export function getToken() {
@@ -83,6 +83,32 @@ export async function sendBackupNow() {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(data.message || data.error || `send failed: ${res.status}`);
+  }
+  return data;
+}
+
+export async function requestPinReset(email) {
+  const res = await fetch(`${API_BASE}/auth/forgot-pin`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.message || data.error || `request failed: ${res.status}`);
+  }
+  return data;
+}
+
+export async function confirmPinReset(email, code, newPin) {
+  const res = await fetch(`${API_BASE}/auth/reset-pin-with-code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, code, newPin }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.message || data.error || `reset failed: ${res.status}`);
   }
   return data;
 }
