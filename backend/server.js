@@ -7,7 +7,6 @@ const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const XLSX = require("xlsx");
-const nodemailer = require("nodemailer");
 const db = require("./db");
 
 const PORT = process.env.PORT || 4000;
@@ -132,84 +131,6 @@ app.post("/api/auth/reset-admin-pin", (req, res) => {
   admin.pin = bcrypt.hashSync("0000", 10);
   writeEmployees(employees);
   res.json({ ok: true, name: admin.name, message: "PIN '0000'ga qaytarildi" });
-});
-
-// ==================== Email orqali PIN tiklash ====================
-const pinResetAttempts = new Map(); // ip -> { count, resetAt }
-function checkPinResetRateLimit(ip) {
-  const now = Date.now();
-  const rec = pinResetAttempts.get(ip);
-  if (!rec || now > rec.resetAt) {
-    pinResetAttempts.set(ip, { count: 1, resetAt: now + 10 * 60 * 1000 });
-    return true;
-  }
-  rec.count += 1;
-  return rec.count <= 5;
-}
-async function sendResetEmail(toEmail, code, employeeName) {
-  const row = getStmt.get("uvix:settings");
-  if (!row) throw new Error("Email yuborish sozlanmagan");
-  const settings = JSON.parse(row.value);
-  const gmailUser = settings?.gmailUser;
-  const gmailAppPassword = settings?.gmailAppPassword;
-  if (!gmailUser || !gmailAppPassword) throw new Error("Email yuborish sozlanmagan (admin bilan bog'laning)");
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: { user: gmailUser, pass: gmailAppPassword },
-  });
-  await transporter.sendMail({
-    from: `"UVIX Moliya" <${gmailUser}>`,
-    to: toEmail,
-    subject: "UVIX — PIN tiklash kodi",
-    html: `<p>Salom, ${employeeName}!</p><p>PIN kodingizni tiklash uchun tasdiqlash kodi:</p><h2 style="letter-spacing:4px">${code}</h2><p>Bu kod 10 daqiqa amal qiladi. Agar bu so'rovni siz yubormagan bo'lsangiz, e'tiborsiz qoldiring.</p>`,
-  });
-}
-
-// 1-qadam: email kiritiladi, tasdiqlash kodi shu email'ga yuboriladi
-app.post("/api/auth/forgot-pin", async (req, res) => {
-  const ip = req.ip || req.connection?.remoteAddress || "unknown";
-  if (!checkPinResetRateLimit(ip)) {
-    return res.status(429).json({ error: "too_many_attempts", message: "Juda ko'p urinish. 10 daqiqadan so'ng qayta urinib ko'ring." });
-  }
-  const { email } = req.body || {};
-  if (!email) return res.status(400).json({ error: "missing_email" });
-  const employees = readEmployees();
-  const employee = employees.find((e) => (e.email || "").trim().toLowerCase() === String(email).trim().toLowerCase());
-  // Xavfsizlik uchun: email topilmasa ham xuddi shunday muvaffaqiyatli javob qaytaramiz —
-  // aks holda tashqi kishi qaysi emaillar ro'yxatda borligini "sinab ko'rish" imkoniga ega bo'lardi.
-  if (!employee) {
-    return res.json({ ok: true });
-  }
-  const code = String(Math.floor(100000 + Math.random() * 900000));
-  const expiresAt = Date.now() + 10 * 60 * 1000;
-  upsertStmt.run(`uvix:pinReset:${employee.id}`, JSON.stringify({ code, expiresAt }));
-  try {
-    await sendResetEmail(employee.email, code, employee.name);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("Reset email yuborishda xato:", e.message);
-    res.status(500).json({ error: "email_send_failed", message: "Email yuborilmadi — Gmail sozlamalarini tekshiring" });
-  }
-});
-
-// 2-qadam: kod va yangi PIN tasdiqlanadi
-app.post("/api/auth/reset-pin-with-code", (req, res) => {
-  const { email, code, newPin } = req.body || {};
-  if (!email || !code || !newPin) return res.status(400).json({ error: "missing_fields" });
-  if (!/^\d{4,6}$/.test(String(newPin))) return res.status(400).json({ error: "invalid_pin" });
-  const employees = readEmployees();
-  const employee = employees.find((e) => (e.email || "").trim().toLowerCase() === String(email).trim().toLowerCase());
-  if (!employee) return res.status(401).json({ error: "invalid_code", message: "Kod noto'g'ri yoki muddati o'tgan" });
-  const row = getStmt.get(`uvix:pinReset:${employee.id}`);
-  if (!row) return res.status(401).json({ error: "invalid_code", message: "Kod noto'g'ri yoki muddati o'tgan" });
-  const record = JSON.parse(row.value);
-  if (record.code !== String(code) || Date.now() > record.expiresAt) {
-    return res.status(401).json({ error: "invalid_code", message: "Kod noto'g'ri yoki muddati o'tgan" });
-  }
-  employee.pin = bcrypt.hashSync(String(newPin), 10);
-  writeEmployees(employees);
-  deleteStmt.run(`uvix:pinReset:${employee.id}`);
-  res.json({ ok: true });
 });
 
 // Kirish — PIN tekshiriladi, muvaffaqiyatli bo'lsa token beriladi
