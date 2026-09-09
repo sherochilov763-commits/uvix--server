@@ -87,6 +87,32 @@ export async function sendBackupNow() {
   return data;
 }
 
+export async function requestPinReset(email) {
+  const res = await fetch(`${API_BASE}/auth/forgot-pin`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.message || data.error || `request failed: ${res.status}`);
+  }
+  return data;
+}
+
+export async function confirmPinReset(email, code, newPin) {
+  const res = await fetch(`${API_BASE}/auth/reset-pin-with-code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, code, newPin }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.message || data.error || `reset failed: ${res.status}`);
+  }
+  return data;
+}
+
 export async function authResetAdminPin() {
   const res = await fetch(`${API_BASE}/auth/reset-admin-pin`, { method: "POST" });
   const data = await res.json().catch(() => ({}));
